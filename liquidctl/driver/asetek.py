@@ -7,6 +7,7 @@ Supported devices:
 - NZXT Kraken X (X40 or X60); legacy generic Asetek 690LC
 - Corsair H80i GT, H100i GTX or H110i GTX
 - Corsair H80i v2, H100i v2 or H115i
+- Corsair H100i Pro - sixth gen
 
 Copyright (C) 2018–2020  Jonas Malaco and contributors
 
@@ -57,6 +58,20 @@ _LEGACY_FIXED_SPEED_CHANNELS = {    # (message type, minimum duty, maximum duty)
     'fan':  (_CMD_OVERRIDE, 0, 100),
     'pump':  (_CMD_PUMP_PWM, 50, 100),
 }
+
+_PRO_WRITE_ENDPOINT = 0x1
+_PRO_READ_ENDPOINT = 0x81
+_PRO_CMD_READ_FIRMWARE = 0xaa
+_PRO_CMD_READ_AIO_TEMP = 0xa9
+_PRO_CMD_READ_FAN_SPEED = 0x41
+_PRO_CMD_READ_PUMP_SPEED = 0x31
+_PRO_CMD_READ_PUMP_MODE = 0x33
+_PRO_CMD_WRITE_PUMP_MODE = 0x32
+_PRO_PUMP_MODES = [
+    'Quiet',
+    'Balanced',
+    'Performance'
+    ]
 
 # USBXpress specific control parameters; from the USBXpress SDK
 # (Customization/CP21xx_Customization/AN721SW_Linux/silabs_usb.h)
@@ -393,8 +408,256 @@ class Hydro690Lc(Modern690Lc):
             raise KeyError('Unsupported lighting mode {}'.format(mode))
         super().set_color(channel, mode, colors, **kwargs)
 
-
 # deprecated aliases
 AsetekDriver = Modern690Lc
 LegacyAsetekDriver = Legacy690Lc
 CorsairAsetekDriver = Hydro690Lc
+
+class CorsairAsetekProDriver(Modern690Lc):
+    """liquidctl driver for Corsair-branded sixth generation Asetek coolers."""
+
+    SUPPORTED_DEVICES = [
+        (0x1b1c, 0x0c15, None, 'Corsair Hydro H100i Pro', {}),
+    ]
+
+    def _write(self, data):
+        LOGGER.debug('write %s', ' '.join(format(i, '02x') for i in data))
+        self.device.write(_PRO_WRITE_ENDPOINT, data, _WRITE_TIMEOUT)
+
+    # Not calling this (or begin transaction) since they do not seem to be needed for H100i Pro
+    def _end_transaction_and_read(self):
+        """End the transaction by reading from the device.
+
+        According to the official documentation, as well as Craig's open-source
+        implementation (libSiUSBXp), it should be necessary to check the queue
+        size and read data in chunks.  However, leviathan and its derivatives
+        seem to work fine without this complexity; we currently try the same
+        approach.
+        """
+        msg = self.device.read(_PRO_READ_ENDPOINT, _READ_LENGTH, _READ_TIMEOUT)
+        LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+        self.device.release()
+        return msg
+
+    def _configure_device(self, color1=[0, 0, 0], color2=[0, 0, 0], color3=[255, 0, 0],
+                          alert_temp=_HIGH_TEMPERATURE, interval1=0, interval2=0,
+                          blackout=False, fading=False, blinking=False, enable_alert=True):
+        raise ValueError('_confiure_device not implemented for CorsairAsetekPro')
+
+    def _prepare_profile(self, profile, min_duty, max_duty):
+        raise ValueError('_prepare_profile not implemented for CorsairAsetekPro')
+
+    def set_speed_profile(self, channel, profile, **kwargs):
+        raise ValueError('set_speed_profile not implemented for CorsairAsetekPro')
+
+    def set_fixed_speed(self, channel, duty, **kwargs):
+        raise ValueError('set_fixed_speed not implemented for CorsairAsetekPro')
+
+    def get_status(self, **kwargs):
+        """Get a status report.
+
+        Returns a list of `(property, value, unit)` tuples.
+        """
+        self._write([_PRO_CMD_READ_FIRMWARE])
+        msg = self.device.read(_PRO_READ_ENDPOINT, 7, _READ_TIMEOUT)
+        LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+        self.device.release()
+        LOGGER.debug('firmware id msg %s', ' '.join(format(i, '02x') for i in msg))
+        firmware = format(msg[3], '01x')+'.'+format(msg[4], '01x')+'.'+format(msg[5], '01x')+'.'+format(msg[6], '01x')
+        LOGGER.debug('Firmware version %s', firmware)
+
+        ### Can some Pro devices have more than one temp sensor?   OCL seems to code for that?
+        self._write([_PRO_CMD_READ_AIO_TEMP])
+        msg = self.device.read(_PRO_READ_ENDPOINT, 6, _READ_TIMEOUT)
+        LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+        self.device.release()
+        LOGGER.debug('aio temp msg %s', ' '.join(format(i, '02x') for i in msg))
+        aio_temp = msg[3] + msg[4]/10
+
+        self._write([_PRO_CMD_READ_FAN_SPEED, 0])
+        msg = self.device.read(_PRO_READ_ENDPOINT, 6, _READ_TIMEOUT)
+        LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+        self.device.release()
+        LOGGER.debug('fan 1 speed msg %s', ' '.join(format(i, '02x') for i in msg))
+        fan1_speed = (msg[4] << 8) + msg[5]
+
+        self._write([_PRO_CMD_READ_FAN_SPEED, 1])
+        msg = self.device.read(_PRO_READ_ENDPOINT, 6, _READ_TIMEOUT)
+        LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+        self.device.release()
+        LOGGER.debug('fan 2 speed msg %s', ' '.join(format(i, '02x') for i in msg))
+        fan2_speed = (msg[4] << 8) + msg[5]
+
+        self._write([_PRO_CMD_READ_PUMP_SPEED])
+        msg = self.device.read(_PRO_READ_ENDPOINT, 5, _READ_TIMEOUT)
+        LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+        self.device.release()
+        LOGGER.debug('pump speed msg %s', ' '.join(format(i, '02x') for i in msg))
+        pump_speed = (msg[3] << 8) + msg[4]
+
+        self._write([_PRO_CMD_READ_PUMP_MODE])
+        msg = self.device.read(_PRO_READ_ENDPOINT, 4, _READ_TIMEOUT)
+        LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+        self.device.release()
+        LOGGER.debug('pump mode msg %s', ' '.join(format(i, '02x') for i in msg))
+        pump_mode = msg[3]
+
+        return [
+            ('Liquid temperature', aio_temp, '°C'),
+            ('Fan 1 speed', fan1_speed | 0, 'rpm'),
+            ('Fan 2 speed', fan2_speed | 0, 'rpm'),
+            ('Pump mode', _PRO_PUMP_MODES[pump_mode], ""),
+            ('Pump speed', pump_speed | 0, 'rpm'),
+            ('Firmware version', firmware, '')
+        ]
+
+    def initialize(self, pump_mode=None, **kwargs):
+        """Initialize the device."""
+        LOGGER.debug('Pro configure device...')
+        if pump_mode == None:
+           return
+        else:
+           LOGGER.debug('pump_mode %s   write value %s', pump_mode, format(_PRO_PUMP_MODES.index(pump_mode),'02x'))
+           self._write([_PRO_CMD_WRITE_PUMP_MODE, _PRO_PUMP_MODES.index(pump_mode)])
+           msg = self.device.read(_PRO_READ_ENDPOINT, 5, _READ_TIMEOUT)
+           LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+           self.device.release()
+
+    def set_color(self, channel, mode, colors, time_per_color=1, time_off=None,
+                  alert_threshold=_HIGH_TEMPERATURE, alert_color=[255, 0, 0],
+                  speed=3, temps=['35', '45', '55'], **kwargs):
+        """Set the color mode for a specific channel."""
+        # keyword arguments may have been forwarded from cli args and need parsing
+        LOGGER.debug('kwargs %s', kwargs)
+        colors = list(colors)
+        LOGGER.debug('color count = %d', len(colors))
+        #self._begin_transaction()
+        if mode == 'rainbow':
+            LOGGER.debug('speed %s', int(speed))
+            # Why does OCL have a default speed?
+            RAINBOW_SPEEDS = [
+              0x30, # slow
+              0x18, # medium
+              0x0C  # fast
+            ]
+            LOGGER.debug('slow %02x medium %02x  fast %02x', RAINBOW_SPEEDS[0], RAINBOW_SPEEDS[1], RAINBOW_SPEEDS[2])
+            self._write([0x53, RAINBOW_SPEEDS[int(speed)-1]])
+            msg = self.device.read(_PRO_READ_ENDPOINT, 3, _READ_TIMEOUT)
+            LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+            self.device.release()
+            self._write([0x55, 0x01])
+            msg = self.device.read(_PRO_READ_ENDPOINT, 3, _READ_TIMEOUT)
+            LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+            self.device.release()
+        elif mode == 'shift':
+            colorCount = 0
+            setColors = []
+            for color in colors:
+               LOGGER.debug('color %s', color)
+               colorCount = colorCount + 1
+               setColors = setColors + color
+
+            self._write([0x56, colorCount] + setColors)
+            msg = self.device.read(_PRO_READ_ENDPOINT, 3, _READ_TIMEOUT)
+            LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+            self.device.release()
+            LOGGER.debug('speed %s', int(speed))
+            SHIFT_SPEEDS = [
+              0x46, # slow
+              0x28, # medium
+              0x0F  # fast
+            ]
+            LOGGER.debug('slow %02x medium %02x  fast %02x', SHIFT_SPEEDS[0], SHIFT_SPEEDS[1], SHIFT_SPEEDS[2])
+            self._write([0x53, SHIFT_SPEEDS[int(speed)-1]])
+            msg = self.device.read(_PRO_READ_ENDPOINT, 3, _READ_TIMEOUT)
+            LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+            self.device.release()
+            self._write([0x55, 0x01])
+            msg = self.device.read(_PRO_READ_ENDPOINT, 3, _READ_TIMEOUT)
+            LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+            self.device.release()
+        elif mode == 'pulse':
+            colorCount = 0
+            setColors = []
+            for color in colors:
+               LOGGER.debug('color %s', color)
+               colorCount = colorCount + 1
+               setColors = setColors + color
+
+            self._write([0x56, colorCount] + setColors)
+            msg = self.device.read(_PRO_READ_ENDPOINT, 3, _READ_TIMEOUT)
+            LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+            self.device.release()
+            LOGGER.debug('speed %s', int(speed))
+            PULSE_SPEEDS = [
+              0x50, # slow
+              0x37, # medium
+              0x1E  # fast
+            ]
+            LOGGER.debug('slow %02x medium %02x  fast %02x', PULSE_SPEEDS[0], PULSE_SPEEDS[1], PULSE_SPEEDS[2])
+            self._write([0x53, PULSE_SPEEDS[int(speed)-1]])
+            msg = self.device.read(_PRO_READ_ENDPOINT, 3, _READ_TIMEOUT)
+            LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+            self.device.release()
+            self._write([0x52, 0x01])
+            msg = self.device.read(_PRO_READ_ENDPOINT, 3, _READ_TIMEOUT)
+            LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+            self.device.release()
+        elif mode == 'blinking':
+            colorCount = 0
+            setColors = []
+            for color in colors:
+               LOGGER.debug('color %s', color)
+               colorCount = colorCount + 1
+               setColors = setColors + color
+
+            self._write([0x56, colorCount] + setColors)
+            msg = self.device.read(_PRO_READ_ENDPOINT, 3, _READ_TIMEOUT)
+            LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+            self.device.release()
+            LOGGER.debug('speed %s', int(speed))
+            BLINKING_SPEEDS = [
+              0x0F, # slow
+              0x0A, # medium
+              0x05  # fast
+            ]
+            LOGGER.debug('slow %02x medium %02x  fast %02x', BLINKING_SPEEDS[0], BLINKING_SPEEDS[1], BLINKING_SPEEDS[2])
+            self._write([0x53, BLINKING_SPEEDS[int(speed)-1]])
+            msg = self.device.read(_PRO_READ_ENDPOINT, 3, _READ_TIMEOUT)
+            LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+            self.device.release()
+            self._write([0x58, 0x01])
+            msg = self.device.read(_PRO_READ_ENDPOINT, 3, _READ_TIMEOUT)
+            LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+            self.device.release()
+        elif mode == 'fixed':
+            self._write([0x56, 0x02] + colors[0] + colors[0])
+            msg = self.device.read(_PRO_READ_ENDPOINT, 3, _READ_TIMEOUT)
+            LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+            self.device.release()
+            self._write([0x55, 0x01])
+            msg = self.device.read(_PRO_READ_ENDPOINT, 3, _READ_TIMEOUT)
+            LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+            self.device.release()
+        elif mode == 'alert':
+            temps = list(temps.split(' '))
+            LOGGER.debug('temps count = %d', len(temps))
+            LOGGER.debug('asetek temps %s %s %s', temps[0], temps[1], temps[2])
+            LOGGER.debug('color count = %d', len(colors))
+            #self._begin_transaction()
+            self._write([0x5f, int(temps[0]), 0x00, int(temps[1]), 0x00, int(temps[2]), 0x00] + colors[0] + colors[1] + colors[2])
+            msg = self.device.read(_PRO_READ_ENDPOINT, 6, _READ_TIMEOUT)
+            LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+            self.device.release()
+            self._write([0x5E, 0x01])
+            msg = self.device.read(_PRO_READ_ENDPOINT, 3, _READ_TIMEOUT)
+            LOGGER.debug('received %s', ' '.join(format(i, '02x') for i in msg))
+            self.device.release()
+        else:
+            raise KeyError('Unknown lighting mode {}'.format(mode))
+
+    @classmethod
+    def probe(cls, handle, legacy_690lc=False, **kwargs):
+        # the modern driver overrides probe and rigs it to switch on
+        # --legacy-690lc, so we override it again
+        return super().probe(handle, legacy_690lc=False, **kwargs)
